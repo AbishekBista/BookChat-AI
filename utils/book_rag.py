@@ -8,6 +8,7 @@ from langchain.schema.retriever import BaseRetriever
 import boto3
 import logging
 import time
+from pypdf import PdfReader
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -30,6 +31,7 @@ class BookRAG:
         self._initialize_embeddings()
         self._initialize_vectorstore()
         self._populate_default_knowledge()
+        self._load_pdf_knowledge()
         self._initialize_retrievers()
 
     def _initialize_embeddings(self):
@@ -190,11 +192,108 @@ class BookRAG:
         except Exception as e:
             logger.error(f"Error populating default knowledge: {str(e)}")
 
+    def _load_pdf_knowledge(self):
+        """Load the literary_knowledge.pdf if it hasn't been loaded yet."""
+        try:
+            # Check if PDF has already been loaded by querying metadata
+            try:
+                pdf_check_docs = self.vectorstore.get(
+                    where={"source": "literary_knowledge.pdf"},
+                    limit=1
+                )
+                
+                if pdf_check_docs and pdf_check_docs.get('ids'):
+                    logger.info("PDF knowledge already loaded, skipping...")
+                    return
+            except Exception as check_error:
+                logger.info(f"Could not check for existing PDF, will attempt to load: {check_error}")
+            
+            pdf_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "knowledge_base",
+                "literary_knowledge.pdf"
+            )
+            
+            if not os.path.exists(pdf_path):
+                logger.warning(f"PDF file not found at {pdf_path}")
+                return
+            
+            logger.info(f"Loading PDF from {pdf_path}...")
+            self.ingest_pdf(pdf_path)
+            logger.info("PDF knowledge loaded successfully")
+            
+        except Exception as e:
+            logger.error(f"Error loading PDF knowledge: {str(e)}")
+
+    def ingest_pdf(self, pdf_path: str, metadata: Dict[str, Any] = None):
+        """
+        Ingest a PDF file into the knowledge base.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            metadata: Optional metadata to attach to all documents from this PDF
+        """
+        try:
+            if not os.path.exists(pdf_path):
+                logger.error(f"PDF file not found: {pdf_path}")
+                return
+            
+            logger.info(f"Reading PDF: {pdf_path}")
+            reader = PdfReader(pdf_path)
+            total_pages = len(reader.pages)
+            logger.info(f"PDF has {total_pages} pages")
+            
+            # Extract text from all pages
+            full_text = ""
+            for page_num, page in enumerate(reader.pages, 1):
+                text = page.extract_text()
+                if text:
+                    full_text += f"\n\n[Page {page_num}]\n{text}"
+            
+            if not full_text.strip():
+                logger.warning("No text extracted from PDF")
+                return
+            
+            logger.info(f"Extracted {len(full_text)} characters from PDF")
+            
+            # Split text into chunks
+            chunks = self.text_splitter.split_text(full_text)
+            logger.info(f"Split PDF into {len(chunks)} chunks")
+            
+            # Create documents with metadata
+            documents = []
+            base_metadata = metadata or {}
+            base_metadata["source"] = os.path.basename(pdf_path)
+            base_metadata["category"] = base_metadata.get("category", "pdf_knowledge")
+            
+            for i, chunk in enumerate(chunks):
+                doc_metadata = base_metadata.copy()
+                doc_metadata["chunk_id"] = i
+                doc_metadata["total_chunks"] = len(chunks)
+                
+                doc = Document(
+                    page_content=chunk,
+                    metadata=doc_metadata
+                )
+                documents.append(doc)
+            
+            # Add to vectorstore
+            logger.info(f"Adding {len(documents)} documents to vectorstore...")
+            self.vectorstore.add_documents(documents)
+            self.vectorstore.persist()
+            
+            logger.info(f"Successfully ingested PDF: {pdf_path}")
+            logger.info(f"Added {len(documents)} chunks to knowledge base")
+            
+        except Exception as e:
+            logger.error(f"Error ingesting PDF {pdf_path}: {str(e)}")
+            logger.exception("PDF ingestion error details:")
+
     def _initialize_retrievers(self):
         try:
             if not self.vectorstore:
                 logger.warning(
-                    "⚠️ Cannot initialize retrievers - vectorstore not available"
+                    "Cannot initialize retrievers - vectorstore not available"
                 )
                 return
 
@@ -229,7 +328,7 @@ class BookRAG:
         retriever = retrievers.get(strategy)
         if retriever is None:
             logger.warning(
-                f"⚠️ Retriever strategy '{strategy}' not available, falling back to similarity"
+                f"Retriever strategy '{strategy}' not available, falling back to similarity"
             )
             return retrievers.get("similarity")
 
@@ -297,7 +396,7 @@ class BookRAG:
 
         try:
             if not self.vectorstore:
-                logger.warning("⚠️ RAG: Vectorstore not initialized")
+                logger.warning("RAG: Vectorstore not initialized")
                 return ""
 
             logger.info("RAG: Performing similarity search...")
@@ -373,8 +472,21 @@ class BookRAG:
             if not filter_dict:
                 return []
 
-            results = self.vectorstore.similarity_search("", k=50, filter=filter_dict)
-            return results
+            # Use the collection's get method with where clause
+            collection = self.vectorstore._collection
+            results = collection.get(where=filter_dict, limit=100)
+            
+            # Convert to Document objects
+            documents = []
+            if results['ids']:
+                for i, doc_id in enumerate(results['ids']):
+                    doc = Document(
+                        page_content=results['documents'][i],
+                        metadata=results['metadatas'][i]
+                    )
+                    documents.append(doc)
+            
+            return documents
 
         except Exception as e:
             logger.error(f"Error searching by metadata: {str(e)}")
@@ -387,21 +499,28 @@ class BookRAG:
 
             total_docs = self.vectorstore._collection.count()
 
-            sample_docs = self.vectorstore.similarity_search("", k=min(100, total_docs))
+            # Get sample documents using collection's get method
+            collection = self.vectorstore._collection
+            sample_results = collection.get(limit=min(100, total_docs))
+            
             categories = set()
             authors = set()
+            sources = set()
 
-            for doc in sample_docs:
-                if doc.metadata.get("category"):
-                    categories.add(doc.metadata["category"])
-                if doc.metadata.get("author"):
-                    authors.add(doc.metadata["author"])
+            for metadata in sample_results['metadatas']:
+                if metadata.get("category"):
+                    categories.add(metadata["category"])
+                if metadata.get("author"):
+                    authors.add(metadata["author"])
+                if metadata.get("source"):
+                    sources.add(metadata["source"])
 
             return {
                 "total_documents": total_docs,
                 "categories": list(categories),
                 "unique_authors": len(authors),
                 "sample_categories": list(categories)[:10],
+                "sources": list(sources)[:10],
             }
 
         except Exception as e:

@@ -1,0 +1,9 @@
+bookchat-env
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+.vscode/
+.env
+.DS_Store
+logs/
+chroma_db/

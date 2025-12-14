@@ -393,7 +393,7 @@ Provide a detailed, actionable analysis suitable for guiding searches and recomm
             }
 
         except Exception as e:
-            logger.warning(f"⚠️ Theme extraction failed: {str(e)}")
+            logger.warning(f"Theme extraction failed: {str(e)}")
 
             return self._extract_themes_manually(plot_description)
 

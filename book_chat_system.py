@@ -11,7 +11,6 @@ from utils.openlibrary_api import OpenLibraryAPI
 from utils.book_rag import BookRAG
 from utils.prompt_templates import PromptTemplates
 from utils.book_tools import get_book_tools
-from utils.lcel_chains import BookChatChains
 import boto3
 import logging
 import time
@@ -142,15 +141,7 @@ class BookChatSystem:
             )
             logger.exception("Agent initialization error details:")
             self.agent = None
-        logger.info("Initializing LCEL chains...")
-        try:
-            self.lcel_chains = BookChatChains(
-                self.llm, self.book_rag, self.openlibrary_api
-            )
-            logger.info("LCEL chains initialized successfully")
-        except Exception as e:
-            logger.warning(f"LCEL chains initialization failed: {str(e)}")
-            self.lcel_chains = None
+
         self.conversation_history = []
         logger.info("Enhanced conversation memory initialized")
         init_duration = time.time() - start_time
@@ -271,338 +262,154 @@ class BookChatSystem:
 
         return query.strip()
 
-    def _validate_book_relevance(self, user_query: str) -> Dict[str, Any]:
+    def _validate_book_relevance(self, user_query: str, conversation_history: list = None) -> Dict[str, Any]:
+        """
+        Use LLM to validate if a query is related to books, literature, or reading.
+        Returns a dict with is_book_related, confidence, and reason.
+        """
         logger.info(
-            f"Validating book relevance for query: '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'"
+            f"Validating book relevance with LLM for query: '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'"
         )
 
+        try:
+            # Build conversation context if available
+            context_str = ""
+            if conversation_history and len(conversation_history) > 0:
+                logger.info(f"Including conversation context: {len(conversation_history)} messages")
+                context_str = "\n\nRecent conversation context:\n"
+                # Get last 3 message pairs (10 messages) for context
+                recent_messages = conversation_history[-10:]
+                for msg in recent_messages:
+                    role = "User" if msg.get("role") == "user" else "Assistant"
+                    content = msg.get("content", "")[:200]  # Limit length
+                    context_str += f"{role}: {content}\n"
+                context_str += "\nIMPORTANT: If the current query refers to something mentioned in the conversation context (e.g., 'he', 'she', 'it', 'that book', 'the author'), consider it book-related if the context was about books/authors.\n"
+            else:
+                logger.info("No conversation context available for validation")
+
+            validation_prompt = f"""You are a classification assistant for a book-focused chatbot called BookChat AI.
+
+Your task is to determine if the user's query is related to books, literature, reading, or writing.{context_str}
+
+Book-related topics include:
+- Book recommendations and suggestions
+- Questions about specific books, novels, stories, or literary works
+- Author information and biographies
+- Literary analysis (themes, characters, plot, writing style)
+- Reading recommendations and lists
+- Book reviews and critiques
+- Poetry and poems
+- Publishing, editions, and book formats
+- Libraries, bookstores, and reading culture
+- Writing techniques and creative writing
+- Literary genres and movements
+- Famous literary works and classics
+
+Non-book-related topics include:
+- Weather, cooking, math, technology companies
+- Current events, news, politics (unless about books/authors)
+- Medical, legal, or financial advice
+- Sports, entertainment (unless about books/movies based on books)
+- General knowledge questions unrelated to literature
+
+Current user query: "{user_query}"
+
+Respond with ONLY a JSON object in this exact format:
+{{
+  "is_book_related": true or false,
+  "confidence": "high" or "medium" or "low",
+  "reason": "brief explanation in 5-10 words"
+}}
+
+Do not include any other text or explanation outside the JSON object."""
+
+            # Use the LLM to validate
+            messages = [
+                SystemMessage(content="You are a precise classification assistant that responds only with valid JSON."),
+                HumanMessage(content=validation_prompt)
+            ]
+            
+            start_time = time.time()
+            response = self.llm.invoke(messages)
+            duration = time.time() - start_time
+            
+            logger.info(f"LLM validation completed in {duration:.2f}s")
+            
+            # Parse the response
+            response_text = response.content.strip()
+            logger.info(f"LLM response: {response_text[:200]}")
+            
+            # Try to extract JSON from response
+            import json
+            import re
+            
+            # Look for JSON object in the response
+            json_match = re.search(r'\{[^{}]*"is_book_related"[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                result = json.loads(json_str)
+                
+                # Validate the response has required fields
+                if "is_book_related" in result and "confidence" in result and "reason" in result:
+                    logger.info(
+                        f"LLM classification: is_book_related={result['is_book_related']}, "
+                        f"confidence={result['confidence']}, reason={result['reason']}"
+                    )
+                    return result
+                else:
+                    logger.warning("LLM response missing required fields")
+            
+            # If parsing failed, fall back to simple keyword check
+            logger.warning("Could not parse LLM response, falling back to keyword check")
+            return self._fallback_keyword_validation(user_query)
+            
+        except Exception as e:
+            logger.error(f"LLM validation failed: {str(e)}")
+            logger.exception("LLM validation error details:")
+            # Fall back to simple keyword check
+            return self._fallback_keyword_validation(user_query)
+    
+    def _fallback_keyword_validation(self, user_query: str) -> Dict[str, Any]:
+        """Simple keyword-based fallback validation."""
+        logger.info("Using fallback keyword validation")
+        
         query_lower = user_query.lower().strip()
-
-        explicit_book_terms = [
-            "book",
-            "books",
-            "novel",
-            "novels",
-            "literature",
-            "literary",
-            "author",
-            "authors",
-            "writer",
-            "writers",
-            "poet",
-            "poets",
-            "read",
-            "reading",
-            "write",
-            "writing",
-            "publish",
-            "published",
-            "story",
-            "stories",
-            "plot",
-            "character",
-            "characters",
-            "chapter",
-            "chapters",
-            "fiction",
-            "non-fiction",
-            "nonfiction",
-            "poetry",
-            "poem",
-            "poems",
-            "prose",
-            "library",
-            "libraries",
-            "bookstore",
-            "isbn",
-            "edition",
-            "manuscript",
-            "genre",
-            "genres",
-            "classic",
-            "classics",
-            "theme",
-            "themes",
-            "literary analysis",
-            "book review",
-            "character analysis",
-            "plot analysis",
-            "recommend book",
-            "suggest book",
-            "book recommendation",
+        
+        # Quick book-related keyword check
+        book_keywords = [
+            "book", "novel", "author", "read", "literature", "story", "write",
+            "poem", "poetry", "fiction", "character", "plot", "genre", "classic",
+            "library", "publish", "chapter", "theme"
         ]
-
-        explicit_matches = [term for term in explicit_book_terms if term in query_lower]
-        if explicit_matches:
-            logger.info(f"Explicit book terms found: {explicit_matches[:2]}")
+        
+        # Quick non-book keyword check
+        non_book_keywords = [
+            "weather", "recipe", "cook", "calculate", "news", "stock", "medical",
+            "google", "facebook", "sports", "temperature", "election"
+        ]
+        
+        has_book_keyword = any(keyword in query_lower for keyword in book_keywords)
+        has_non_book_keyword = any(keyword in query_lower for keyword in non_book_keywords)
+        
+        if has_book_keyword and not has_non_book_keyword:
             return {
                 "is_book_related": True,
-                "confidence": "high",
-                "reason": "explicit_book_terms",
-                "terms_found": explicit_matches[:2],
+                "confidence": "medium",
+                "reason": "contains book-related keywords"
             }
-
-        obvious_non_book_patterns = [
-            "weather today",
-            "weather forecast",
-            "temperature today",
-            "rain today",
-            "what is the weather",
-            "how hot is it",
-            "will it rain",
-            "how do i cook",
-            "how to cook",
-            "recipe for",
-            "cooking instructions",
-            "cook pasta",
-            "make pasta",
-            "prepare food",
-            "what is 2+2",
-            "what is 1+1",
-            "2 plus 2",
-            "1 plus 1",
-            "calculate",
-            "what is 3+3",
-            "what is 4+4",
-            "simple math",
-            "math problem",
-            "tell me about google",
-            "about google",
-            "google search",
-            "google maps",
-            "facebook profile",
-            "youtube video",
-            "how to use google",
-            "news today",
-            "breaking news",
-            "current events",
-            "latest news",
-            "politics today",
-            "stock market today",
-            "election results",
-            "medical advice",
-            "doctor appointment",
-            "legal advice",
-            "tax help",
-            "financial planning",
-            "investment advice",
-        ]
-
-        for pattern in obvious_non_book_patterns:
-            if pattern in query_lower:
-                logger.info(f"Obvious non-book topic detected: {pattern}")
-                return {
-                    "is_book_related": False,
-                    "confidence": "high",
-                    "reason": "obvious_non_book_topic",
-                    "evidence": pattern,
-                }
-
-        logger.info("Checking OpenLibrary API for book relevance...")
-        try:
-            books = self.openlibrary_api.search_books(user_query, limit=5)
-            if books:
-                book_relevance_score = self._analyze_book_relevance(user_query, books)
-
-                if book_relevance_score["is_relevant"]:
-                    logger.info(
-                        f"OpenLibrary API confirmed book relevance: {book_relevance_score['reason']}"
-                    )
-                    return {
-                        "is_book_related": True,
-                        "confidence": book_relevance_score["confidence"],
-                        "reason": "api_confirmed_books",
-                        "analysis": book_relevance_score["reason"],
-                        "books_found": len(books),
-                    }
-                else:
-                    logger.info(
-                        f"OpenLibrary results not genuinely book-related: {book_relevance_score['reason']}"
-                    )
-
-            if not books or len(books) == 0:
-                key_terms = self._extract_key_terms(user_query)
-                if key_terms != user_query and len(key_terms.strip()) > 0:
-                    logger.info(
-                        f"Trying search with extracted key terms: '{key_terms}'"
-                    )
-                    books = self.openlibrary_api.search_books(key_terms, limit=5)
-                    if books:
-                        book_relevance_score = self._analyze_book_relevance(
-                            key_terms, books
-                        )
-
-                        if book_relevance_score["is_relevant"]:
-                            logger.info(
-                                f"OpenLibrary API confirmed book relevance with key terms: {book_relevance_score['reason']}"
-                            )
-                            return {
-                                "is_book_related": True,
-                                "confidence": book_relevance_score["confidence"],
-                                "reason": "api_confirmed_books_key_terms",
-                                "analysis": book_relevance_score["reason"],
-                                "books_found": len(books),
-                                "key_terms_used": key_terms,
-                            }
-
-        except Exception as e:
-            logger.warning(f"OpenLibrary search failed: {str(e)}")
-
-        if any(word in query_lower for word in ["recommend", "suggest", "suggestion"]):
-            if not any(book_word in query_lower for book_word in explicit_book_terms):
-                logger.info("Recommendation request without explicit book references")
-                return {
-                    "is_book_related": False,
-                    "confidence": "high",
-                    "reason": "recommendation_without_book_context",
-                }
-
-        famous_literary_works = [
-            "ramayana",
-            "mahabharata",
-            "iliad",
-            "odyssey",
-            "aeneid",
-            "beowulf",
-            "hamlet",
-            "macbeth",
-            "othello",
-            "romeo and juliet",
-            "king lear",
-            "pride and prejudice",
-            "jane eyre",
-            "wuthering heights",
-            "emma",
-            "great gatsby",
-            "to kill a mockingbird",
-            "moby dick",
-            "war and peace",
-            "anna karenina",
-            "brothers karamazov",
-            "don quixote",
-            "divine comedy",
-            "paradise lost",
-            "canterbury tales",
-            "sherlock holmes",
-            "harry potter",
-            "lord of the rings",
-            "hobbit",
-            "game of thrones",
-            "dune",
-        ]
-
-        literary_matches = [
-            work for work in famous_literary_works if work in query_lower
-        ]
-        if literary_matches:
-            logger.info(f"Famous literary work detected: {literary_matches[0]}")
-
-            key_terms = self._extract_key_terms(user_query)
-            search_query = key_terms if key_terms != user_query else literary_matches[0]
-
-            try:
-                books = self.openlibrary_api.search_books(search_query, limit=3)
-                if books and len(books) > 0:
-                    logger.info(
-                        f"Famous literary work confirmed with API: {literary_matches[0]}"
-                    )
-                    return {
-                        "is_book_related": True,
-                        "confidence": "high",
-                        "reason": "famous_literary_work",
-                        "evidence": literary_matches[0],
-                        "books_found": len(books),
-                        "search_terms": search_query,
-                    }
-            except Exception as e:
-                logger.warning(f"Literary work verification failed: {str(e)}")
-
-        has_context_hint = any(
-            hint in query_lower
-            for hint in ["about", "history of", "biography", "life of"]
-        )
-
-        if has_context_hint:
-            logger.info("Query has contextual hints, checking OpenLibrary API...")
-            try:
-                books = self.openlibrary_api.search_books(user_query, limit=3)
-                if books:
-                    relevant_books = []
-                    for book in books:
-                        title = book.get("title", "").lower()
-
-                        if any(
-                            word in title
-                            for word in user_query.lower().split()
-                            if len(word) > 3
-                        ):
-                            relevant_books.append(book)
-
-                    if relevant_books:
-                        logger.info(
-                            f"Found {len(relevant_books)} contextually relevant books"
-                        )
-                        return {
-                            "is_book_related": True,
-                            "confidence": "medium",
-                            "reason": "contextual_api_match",
-                            "relevant_books": len(relevant_books),
-                        }
-                        return {
-                            "is_book_related": True,
-                            "confidence": "medium",
-                            "reason": "contextual_api_match",
-                            "relevant_books": len(relevant_books),
-                        }
-            except Exception as e:
-                logger.warning(f"OpenLibrary search failed: {str(e)}")
-
-        obvious_non_book_topics = [
-            "google",
-            "apple",
-            "microsoft",
-            "facebook",
-            "netflix",
-            "spotify",
-            "weather",
-            "temperature",
-            "climate",
-            "current events",
-            "news",
-            "calculate",
-            "equation",
-            "formula",
-            "what is 2 +",
-            "math problem",
-            "recipe",
-            "cook pasta",
-            "cooking ingredients",
-            "meal prep",
-            "football score",
-            "basketball game",
-            "soccer match",
-            "sports news",
-            "technical support",
-            "troubleshoot",
-            "install software",
-        ]
-
-        for topic in obvious_non_book_topics:
-            if topic in query_lower:
-                logger.info(f"Obvious non-book topic detected: {topic}")
-                return {
-                    "is_book_related": False,
-                    "confidence": "high",
-                    "reason": "obvious_non_book_topic",
-                    "detected_topic": topic,
-                }
-
-        logger.info("No strong book indicators found")
-        return {
-            "is_book_related": False,
-            "confidence": "high",
-            "reason": "insufficient_book_indicators",
-        }
+        elif has_non_book_keyword:
+            return {
+                "is_book_related": False,
+                "confidence": "medium",
+                "reason": "contains non-book topic keywords"
+            }
+        else:
+            # Default to not book-related if uncertain
+            return {
+                "is_book_related": False,
+                "confidence": "low",
+                "reason": "no clear book indicators found"
+            }
 
     def _analyze_book_relevance(self, query: str, books: List[Dict]) -> Dict[str, Any]:
         logger.info(f"Analyzing book relevance for {len(books)} results")
@@ -844,7 +651,6 @@ If you have any questions about books, authors, or reading, I'd be delighted to 
         user_query: str,
         book_context: List[Dict[str, Any]] = None,
         chat_mode: str = "General Book Discussion",
-        use_lcel: bool = False,
     ) -> str:
         logger.info(
             f"Starting response generation for query: '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'"
@@ -852,59 +658,10 @@ If you have any questions about books, authors, or reading, I'd be delighted to 
         logger.info(f"Chat mode: {chat_mode}")
         logger.info(f"Book context: {len(book_context) if book_context else 0} books")
 
-        validation_result = self._validate_book_relevance(user_query)
-
-        if not validation_result["is_book_related"]:
-            logger.info(f"Non-book query detected: {validation_result['reason']}")
-            return self._get_non_book_response(user_query, validation_result)
-
-        logger.info(
-            f"Book-related query confirmed: {validation_result['reason']} (confidence: {validation_result['confidence']})"
-        )
+        # Note: Query validation is already done in app.py before calling this method
+        # No need to re-validate here as non-book queries are filtered out earlier
 
         start_time = time.time()
-
-        if use_lcel and self.lcel_chains:
-            logger.info("Using LCEL chains for response generation")
-            try:
-                chat_history = [msg for msg in self.memory.chat_memory.messages[-6:]]
-                response_content = self.lcel_chains.run_chain(
-                    query=user_query, chat_mode=chat_mode, chat_history=chat_history
-                )
-
-                self.memory.save_context(
-                    {"input": user_query}, {"output": response_content}
-                )
-                self.summary_memory.save_context(
-                    {"input": user_query}, {"output": response_content}
-                )
-
-                self.conversation_history.append(
-                    {
-                        "user": user_query,
-                        "assistant": response_content,
-                        "context": {
-                            "book_context": book_context,
-                            "chat_mode": chat_mode,
-                            "method": "lcel_chains",
-                        },
-                        "metadata": {
-                            "timestamp": time.time(),
-                            "total_duration": time.time() - start_time,
-                        },
-                    }
-                )
-
-                total_duration = time.time() - start_time
-                logger.info(
-                    f"LCEL response generation completed successfully in {total_duration:.2f}s"
-                )
-                return response_content
-
-            except Exception as e:
-                logger.warning(
-                    f"LCEL chains failed, falling back to traditional approach: {str(e)}"
-                )
 
         try:
             logger.info("Step 1: Getting external book context from OpenLibrary API...")
@@ -962,7 +719,7 @@ IMPORTANT GUARDRAILS:
                     f"Adding LangChain conversation history ({len(chat_history)} messages)"
                 )
 
-                for i, msg in enumerate(chat_history[-6:]):
+                for i, msg in enumerate(chat_history[-10:]):
                     messages.insert(1 + i, msg)
 
             if self.agent and self._should_use_agent(user_query):
@@ -1009,7 +766,7 @@ IMPORTANT GUARDRAILS:
                 llm_start = time.time()
 
                 if langchain_tracer:
-                    logger.info("📊 Using LangSmith tracing for LLM call")
+                    logger.info("Using LangSmith tracing for LLM call")
                     response = self._call_llm(messages, callbacks=[langchain_tracer])
                 else:
                     response = self._call_llm(messages)
@@ -1130,7 +887,7 @@ IMPORTANT GUARDRAILS:
         try:
             if hasattr(self.llm, "invoke"):
                 result = (
-                    self.llm.invoke(messages, callbacks=callbacks)
+                    self.llm.invoke(messages, config={"callbacks": callbacks})
                     if callbacks
                     else self.llm.invoke(messages)
                 )
@@ -1140,14 +897,14 @@ IMPORTANT GUARDRAILS:
                     return result
 
                 return DummyResp(str(result))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"invoke() failed: {str(e)}, trying fallback")
 
+        # Fallback for simpler LLMs
         prompt = self._messages_to_prompt(messages)
         try:
-            result = (
-                self.llm(prompt, callbacks=callbacks) if callbacks else self.llm(prompt)
-            )
+            # Don't use callbacks with direct call, only with invoke
+            result = self.llm(prompt)
             if isinstance(result, str):
                 return DummyResp(result)
             if hasattr(result, "content"):

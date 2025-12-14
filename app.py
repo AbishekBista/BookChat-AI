@@ -9,7 +9,7 @@ import logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bookchat_app.log")],
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ else:
     )
 
 
-def is_book_related_query(query, book_chat_system=None):
+def is_book_related_query(query, book_chat_system=None, conversation_history=None):
     import time
 
     logger.info(
@@ -38,7 +38,7 @@ def is_book_related_query(query, book_chat_system=None):
         return False, "BookChatSystem not available"
 
     try:
-        validation_result = book_chat_system._validate_book_relevance(query)
+        validation_result = book_chat_system._validate_book_relevance(query, conversation_history)
 
         is_book_related = validation_result.get("is_book_related", False)
         reason = validation_result.get("reason", "unknown")
@@ -416,7 +416,9 @@ def main():
                 logger.info("Starting book-related query analysis...")
 
                 is_book_query, analysis_reason = is_book_related_query(
-                    latest_message, book_chat_system=st.session_state.book_chat_system
+                    latest_message, 
+                    book_chat_system=st.session_state.book_chat_system,
+                    conversation_history=st.session_state.messages
                 )
 
                 logger.info(
@@ -437,56 +439,55 @@ def main():
                     logger.info(
                         "Query classified as book-related, processing with BookChatSystem..."
                     )
-                    with st.spinner("Thinking about your literary question..."):
+                    logger.info(
+                        f"Preparing context from {len(st.session_state.selected_books)} selected books..."
+                    )
+                    book_context = []
+
+                    for i, book in enumerate(st.session_state.selected_books):
+                        book_info = {
+                            "title": book.get("title", ""),
+                            "author": book.get("author_name", [""])[0]
+                            if book.get("author_name")
+                            else "",
+                            "publish_year": book.get("first_publish_year", ""),
+                            "subjects": book.get("subject", [])[:5]
+                            if book.get("subject")
+                            else [],
+                        }
+                        book_context.append(book_info)
                         logger.info(
-                            f"Preparing context from {len(st.session_state.selected_books)} selected books..."
-                        )
-                        book_context = []
-
-                        for i, book in enumerate(st.session_state.selected_books):
-                            book_info = {
-                                "title": book.get("title", ""),
-                                "author": book.get("author_name", [""])[0]
-                                if book.get("author_name")
-                                else "",
-                                "publish_year": book.get("first_publish_year", ""),
-                                "subjects": book.get("subject", [])[:5]
-                                if book.get("subject")
-                                else [],
-                            }
-                            book_context.append(book_info)
-                            logger.info(
-                                f"Book {i + 1}: '{book_info['title']}' by {book_info['author']}"
-                            )
-
-                        logger.info("Calling BookChatSystem.get_response()...")
-                        chat_mode = st.session_state.get(
-                            "chat_mode", "General Book Discussion"
-                        )
-                        logger.info(f"Chat mode: {chat_mode}")
-
-                        response = st.session_state.book_chat_system.get_response(
-                            latest_message,
-                            book_context=book_context,
-                            chat_mode=chat_mode,
+                            f"Book {i + 1}: '{book_info['title']}' by {book_info['author']}"
                         )
 
-                        logger.info(
-                            f"BookChatSystem response received ({len(response)} chars)"
-                        )
-                        logger.info(
-                            f"Response preview: {response[:150]}{'...' if len(response) > 150 else ''}"
-                        )
+                    logger.info("Calling BookChatSystem.get_response()...")
+                    chat_mode = st.session_state.get(
+                        "chat_mode", "General Book Discussion"
+                    )
+                    logger.info(f"Chat mode: {chat_mode}")
 
-                        logger.info("Formatting response...")
-                        formatted_response = format_response(
-                            response, None, book_context, is_book_query=True
-                        )
+                    response = st.session_state.book_chat_system.get_response(
+                        latest_message,
+                        book_context=book_context,
+                        chat_mode=chat_mode,
+                    )
 
-                        st.session_state.messages.append(
-                            {"role": "assistant", "content": formatted_response}
-                        )
-                        logger.info("Assistant response added to chat history")
+                    logger.info(
+                        f"BookChatSystem response received ({len(response)} chars)"
+                    )
+                    logger.info(
+                        f"Response preview: {response[:150]}{'...' if len(response) > 150 else ''}"
+                    )
+
+                    logger.info("Formatting response...")
+                    formatted_response = format_response(
+                        response, None, book_context, is_book_query=True
+                    )
+
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": formatted_response}
+                    )
+                    logger.info("Assistant response added to chat history")
 
                 logger.info("Rerunning Streamlit to display response")
                 st.rerun()
