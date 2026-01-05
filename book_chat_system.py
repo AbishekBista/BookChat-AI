@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from langchain_aws import ChatBedrock
 from langchain.schema import HumanMessage, SystemMessage
@@ -21,23 +22,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+load_dotenv()
+
 
 langchain_tracer = None
-if os.getenv("LANGCHAIN_TRACING_V2") == "true":
+if os.getenv("LANGSMITH_TRACING_V2") == "true":
     try:
         langchain_tracer = LangChainTracer(
-            project_name=os.getenv("LANGCHAIN_PROJECT", "bookchat-ai")
+            project_name=os.getenv("LANGSMITH_PROJECT", "bookchat-ai")
         )
         logger.info("LangSmith tracing initialized successfully")
         logger.info(
-            f"LangSmith project: {os.getenv('LANGCHAIN_PROJECT', 'bookchat-ai')}"
+            f"LangSmith project: {os.getenv('LANGSMITH_PROJECT', 'bookchat-ai')}"
         )
     except Exception as e:
         logger.warning(f"Failed to initialize LangSmith tracer: {str(e)}")
         langchain_tracer = None
 else:
     logger.info(
-        "LangSmith tracing not enabled. Set LANGCHAIN_TRACING_V2=true to enable."
+        "LangSmith tracing not enabled. Set LANGSMITH_TRACING_V2=true to enable."
     )
 
 
@@ -124,6 +127,27 @@ class BookChatSystem:
 
         self.tools = get_book_tools()
         try:
+            # Custom agent prefix to prevent exposing internal tool names
+            agent_prefix = """You are BookChat AI, a knowledgeable literary assistant helping users with book-related inquiries.
+
+CRITICAL INSTRUCTION: NEVER reveal the names or technical details of your internal tools, systems, or implementation to users. Do not mention tool names like 'book_search', 'book_knowledge', 'book_recommendations' or any other system internals.
+
+When helping users, respond naturally as a helpful assistant would, without explaining HOW you're obtaining the information. Simply provide the information they need in a conversational, helpful manner.
+
+Instead of saying "Use this tool..." or "I'll use the book_search tool...", simply help the user directly with their request.
+
+You have access to various capabilities to help with:
+- Finding and searching for books
+- Providing literary knowledge and analysis
+- Offering personalized book recommendations
+
+Respond to user queries naturally and helpfully without exposing your internal workings."""
+
+            agent_suffix = """Begin! Remember to NEVER mention tool names or internal system details to the user.
+
+Question: {input}
+{agent_scratchpad}"""
+
             self.agent = initialize_agent(
                 tools=self.tools,
                 llm=self.llm,
@@ -133,6 +157,10 @@ class BookChatSystem:
                 max_iterations=3,
                 early_stopping_method="generate",
                 return_intermediate_steps=False,
+                agent_kwargs={
+                    "prefix": agent_prefix,
+                    "suffix": agent_suffix,
+                },
             )
             logger.info("LangChain Agent initialized successfully")
         except Exception as e:
@@ -146,11 +174,6 @@ class BookChatSystem:
         logger.info("Enhanced conversation memory initialized")
         init_duration = time.time() - start_time
         logger.info(f"BookChatSystem initialized successfully in {init_duration:.2f}s")
-
-    def update_api_key(self, api_key: str):
-        logger.info(
-            "AWS Bedrock uses environment credentials - no API key update needed"
-        )
 
     def clear_conversation_memory(self):
         logger.info("Clearing conversation memory due to book context change")
@@ -187,80 +210,6 @@ class BookChatSystem:
             except Exception as fallback_error:
                 logger.error(f"Failed to reinitialize memory: {str(fallback_error)}")
 
-    def _extract_key_terms(self, query: str) -> str:
-        import re
-
-        query_lower = query.lower()
-
-        noise_words = [
-            "tell me about",
-            "what is",
-            "who wrote",
-            "who is",
-            "what are",
-            "how do",
-            "can you",
-            "please",
-            "i want to know",
-            "information about",
-            "details about",
-            "explain",
-            "describe",
-            "about",
-            "?",
-        ]
-
-        cleaned_query = query_lower
-        for noise in noise_words:
-            cleaned_query = cleaned_query.replace(noise, " ")
-
-        stop_words = {
-            "is",
-            "are",
-            "was",
-            "were",
-            "be",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "to",
-            "of",
-            "in",
-            "on",
-            "at",
-            "by",
-            "for",
-            "with",
-            "as",
-            "it",
-            "he",
-            "she",
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-        }
-
-        words = re.findall(r"\b\w{2,}\b", cleaned_query)
-        meaningful_words = [w for w in words if w not in stop_words]
-
-        if meaningful_words:
-            return " ".join(meaningful_words[:3])
-
-        return query.strip()
 
     def _validate_book_relevance(self, user_query: str, conversation_history: list = None) -> Dict[str, Any]:
         """
@@ -411,241 +360,6 @@ Do not include any other text or explanation outside the JSON object."""
                 "reason": "no clear book indicators found"
             }
 
-    def _analyze_book_relevance(self, query: str, books: List[Dict]) -> Dict[str, Any]:
-        logger.info(f"Analyzing book relevance for {len(books)} results")
-
-        query_words = set(query.lower().split())
-
-        stop_words = {
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "with",
-            "by",
-            "tell",
-            "me",
-            "about",
-            "what",
-            "is",
-            "who",
-            "when",
-            "where",
-            "how",
-            "why",
-        }
-        meaningful_query_words = query_words - stop_words
-
-        relevant_books = 0
-        total_relevance_score = 0
-        evidence = []
-
-        for book in books:
-            title = book.get("title", "").lower()
-            author_names = book.get("author_name", [])
-            subjects = book.get("subject", [])
-
-            book_relevance_score = 0
-            book_evidence = []
-
-            title_words = set(title.split())
-            query_in_title = meaningful_query_words.intersection(title_words)
-            if query_in_title:
-                book_relevance_score += len(query_in_title) * 3
-                book_evidence.append(f"Query words in title: {list(query_in_title)}")
-
-            if author_names:
-                author_text = " ".join(author_names).lower()
-                author_words = set(author_text.split())
-                query_in_author = meaningful_query_words.intersection(author_words)
-                if query_in_author:
-                    book_relevance_score += len(query_in_author) * 2
-                    book_evidence.append(
-                        f"Query words in author: {list(query_in_author)}"
-                    )
-
-            if subjects:
-                book_subjects = [s.lower() for s in subjects]
-                literary_subjects = [
-                    s
-                    for s in book_subjects
-                    if any(
-                        lit_term in s
-                        for lit_term in [
-                            "literature",
-                            "poetry",
-                            "epic",
-                            "mythology",
-                            "classic",
-                            "fiction",
-                            "drama",
-                            "novel",
-                        ]
-                    )
-                ]
-                if literary_subjects:
-                    book_relevance_score += len(literary_subjects)
-                    book_evidence.append(f"Literary subjects: {literary_subjects[:2]}")
-
-            biographical_indicators = ["biography", "life of", "story of", "history of"]
-            if any(indicator in title for indicator in biographical_indicators):
-                book_relevance_score += 2
-                book_evidence.append("Biographical/historical work")
-
-            if book_relevance_score >= 2:
-                relevant_books += 1
-                total_relevance_score += book_relevance_score
-                evidence.extend(book_evidence[:2])
-
-        avg_relevance = total_relevance_score / len(books) if books else 0
-        relevance_ratio = relevant_books / len(books) if books else 0
-
-        logger.info(
-            f"Relevance analysis: {relevant_books}/{len(books)} books relevant, avg score: {avg_relevance:.1f}"
-        )
-
-        if relevance_ratio >= 0.6 and avg_relevance >= 2:
-            return {
-                "is_relevant": True,
-                "confidence": "high",
-                "reason": f"Strong book relevance: {relevant_books}/{len(books)} books match query context",
-                "evidence": evidence[:3],
-            }
-        elif relevance_ratio >= 0.4 and avg_relevance >= 1.5:
-            return {
-                "is_relevant": True,
-                "confidence": "medium",
-                "reason": f"Moderate book relevance: {relevant_books}/{len(books)} books have contextual matches",
-                "evidence": evidence[:2],
-            }
-        elif len(query.split()) == 1 and relevant_books >= 1:
-            return {
-                "is_relevant": True,
-                "confidence": "medium",
-                "reason": f"Single-word query with literary context: {relevant_books} relevant books found",
-                "evidence": evidence[:2],
-            }
-        else:
-            return {
-                "is_relevant": False,
-                "confidence": "high",
-                "reason": f"Low book relevance: only {relevant_books}/{len(books)} books contextually relevant",
-                "evidence": evidence[:1],
-            }
-
-    def _get_non_book_response(
-        self, user_query: str, validation_result: Dict[str, Any]
-    ) -> str:
-        logger.info("Generating non-book response")
-
-        query_lower = user_query.lower()
-
-        if any(
-            word in query_lower
-            for word in [
-                "google",
-                "apple",
-                "microsoft",
-                "tech",
-                "technology",
-                "computer",
-                "software",
-            ]
-        ):
-            return """I'm BookChat AI, a specialized assistant focused exclusively on books, literature, and reading-related topics. 
-
-While technology is fascinating, I can only help with book-related questions such as:
-- Book recommendations and reviews
-- Author information and literary analysis
-- Reading suggestions based on your preferences
-- Finding books by genre, theme, or topic
-- Literary discussions and interpretations
-
-Is there anything about books or reading I can help you with today?"""
-
-        elif any(
-            word in query_lower
-            for word in ["what is", "who is", "when did", "where is", "how to"]
-        ) and not any(
-            book_word in query_lower
-            for book_word in ["book", "author", "read", "write"]
-        ):
-            return """I'm BookChat AI, and I specialize exclusively in books and literature! 
-
-While I'd love to help with general questions, I can only assist with book-related topics like:
-- Book recommendations tailored to your interests
-- Information about authors and their works
-- Literary analysis and book discussions
-- Help finding books on specific subjects
-- Reading suggestions and book reviews
-
-Do you have any questions about books, authors, or reading that I can help with?"""
-
-        elif any(
-            word in query_lower
-            for word in [
-                "movie",
-                "film",
-                "music",
-                "song",
-                "game",
-                "tv",
-                "show",
-                "netflix",
-            ]
-        ):
-            return """I'm BookChat AI, focused exclusively on the wonderful world of books and literature!
-
-While movies, music, and shows are great entertainment, I can only help with book-related topics such as:
-- Books that were adapted into movies or shows
-- Reading recommendations in any genre
-- Author biographies and literary works
-- Finding books similar to stories you enjoyed
-- Book club suggestions and literary discussions
-
-Would you like book recommendations or have any literature questions I can help with?"""
-
-        elif any(
-            word in query_lower
-            for word in [
-                "how are you",
-                "tell me about yourself",
-                "what can you do",
-                "help me with",
-            ]
-        ):
-            return """Hello! I'm BookChat AI, your dedicated assistant for everything related to books and literature!
-
-I specialize in helping with:
-- Book Recommendations - Find your next great read
-- Author Information - Learn about writers and their works
-- Book Discovery - Search by genre, theme, or topic
-- Literary Analysis - Discuss themes, characters, and plots
-- Reading Guidance - Get suggestions based on your preferences
-- Literary History - Explore classics and literary movements
-
-What kind of books are you interested in, or is there something specific about literature you'd like to explore?"""
-
-        else:
-            return """I'm BookChat AI, a specialized assistant dedicated to books, literature, and reading!
-
-I can only help with book-related questions such as:
-- Book recommendations and reviews
-- Author information and literary analysis
-- Finding books by genre, topic, or theme
-- Literary discussions and interpretations
-- Reading suggestions based on your interests
-
-If you have any questions about books, authors, or reading, I'd be delighted to help! What would you like to know about literature today?"""
-
     def get_response(
         self,
         user_query: str,
@@ -697,6 +411,13 @@ IMPORTANT GUARDRAILS:
 - Don't invent publication dates, quotes, or biographical details
 - Acknowledge the limits of your training data
 - When providing book recommendations, base them on well-known works and established reception
+
+CRITICAL: NEVER REVEAL INTERNAL SYSTEM DETAILS
+- Do NOT mention tool names like 'book_search', 'book_knowledge', 'book_recommendations' or any internal system components
+- Do NOT explain your internal process or how you retrieve information
+- Do NOT say things like "Use this tool..." or "Here's how I can help you with my tools..."
+- Simply provide helpful, natural responses as a knowledgeable literary assistant would
+- Act as if you inherently know how to help, without explaining the mechanics
 """
             prompt_duration = time.time() - prompt_start
             logger.info(
@@ -828,12 +549,14 @@ IMPORTANT GUARDRAILS:
             return f"I apologize, but I encountered an error while processing your request: {str(e)}. Please try rephrasing your question."
 
     def _sanitize_agent_output(self, raw_output: str) -> str:
+        """Remove any internal agent artifacts and tool names from output."""
         try:
             if not raw_output:
                 return raw_output
 
             cleaned = raw_output
 
+            # Remove ReAct framework artifacts
             for marker in [
                 "Thought:",
                 "Thought",
@@ -841,9 +564,28 @@ IMPORTANT GUARDRAILS:
                 "Action",
                 "Observation:",
                 "Observation",
+                "Action Input:",
+                "Action Input",
+                "Final Answer:",
             ]:
                 cleaned = cleaned.replace(marker, "")
 
+            # Remove tool name references (case insensitive)
+            import re
+            tool_patterns = [
+                r'book_search',
+                r'book_knowledge',
+                r'book_recommendations',
+                r'Use this tool',
+                r'use the .* tool',
+                r'I\'ll use',
+                r'tool if you need',
+                r'Use .* tool when',
+            ]
+            for pattern in tool_patterns:
+                cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+            # Remove knowledge verification footers
             footers = [
                 "Knowledge Verification:",
                 "Knowledge Verification",
@@ -852,12 +594,12 @@ IMPORTANT GUARDRAILS:
             for f in footers:
                 cleaned = cleaned.replace(f, "")
 
-            import re
-
-            cleaned = re.sub(r"\n{2,}", "\n\n", cleaned).strip()
+            # Clean up excessive newlines
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
             return cleaned
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error sanitizing agent output: {str(e)}")
             return raw_output
 
     def _messages_to_prompt(self, messages: List[Any]) -> str:
@@ -994,20 +736,6 @@ IMPORTANT GUARDRAILS:
     def _build_user_prompt(self, user_query: str, chat_mode: str) -> str:
         return self.prompt_templates.get_user_template(chat_mode, user_query)
 
-    def _format_conversation_history(self) -> str:
-        if not self.conversation_history:
-            return ""
-
-        formatted_history = ""
-
-        recent_history = self.conversation_history[-3:]
-
-        for i, exchange in enumerate(recent_history):
-            formatted_history += f"User: {exchange['user']}\\n"
-            formatted_history += f"Assistant: {exchange['assistant'][:200]}...\\n\\n"
-
-        return formatted_history
-
     def _should_use_agent(self, query: str) -> bool:
         query_lower = query.lower()
 
@@ -1037,32 +765,3 @@ IMPORTANT GUARDRAILS:
             return True
 
         return False
-
-    def clear_history(self):
-        self.conversation_history = []
-        self.memory.clear()
-        self.summary_memory.clear()
-        logger.info("Conversation history cleared")
-
-    def get_conversation_stats(self) -> Dict[str, Any]:
-        return {
-            "total_exchanges": len(self.conversation_history),
-            "chat_modes_used": list(
-                set(
-                    [
-                        exchange["context"]["chat_mode"]
-                        for exchange in self.conversation_history
-                    ]
-                )
-            ),
-            "books_discussed": len(
-                set(
-                    [
-                        book["title"]
-                        for exchange in self.conversation_history
-                        if exchange["context"].get("book_context")
-                        for book in exchange["context"]["book_context"]
-                    ]
-                )
-            ),
-        }

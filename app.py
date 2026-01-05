@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 from book_chat_system import BookChatSystem
 from utils.openlibrary_api import OpenLibraryAPI
 import logging
+import time
+import random
+import re
 
 
 logging.basicConfig(
@@ -16,17 +19,16 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-if os.getenv("LANGCHAIN_TRACING_V2"):
+if os.getenv("LANGSMITH_TRACING_V2"):
     logger.info("LangSmith tracing enabled")
-    logger.info(f"LangSmith project: {os.getenv('LANGCHAIN_PROJECT', 'default')}")
+    logger.info(f"LangSmith project: {os.getenv('LANGSMITH_PROJECT', 'default')}")
 else:
     logger.info(
-        "LangSmith tracing not enabled. Set LANGCHAIN_TRACING_V2=true to enable."
+        "LangSmith tracing not enabled. Set LANGSMITH_TRACING_V2=true to enable."
     )
 
 
 def is_book_related_query(query, book_chat_system=None, conversation_history=None):
-    import time
 
     logger.info(
         f"Starting book-related query analysis for: '{query[:100]}{'...' if len(query) > 100 else ''}'"
@@ -119,16 +121,12 @@ My expertise covers everything book-related:
 Whether you're looking for your next favorite book, want to discuss a story you've read, or explore literary themes, I'm here to help! What literary question can I assist you with?""",
     ]
 
-    import random
-
     return random.choice(responses)
 
 
 def format_response(response, references=None, book_context=None, is_book_query=True):
     if not response:
         return response
-
-    import re
 
     if not is_book_query:
         return response
@@ -148,7 +146,6 @@ def format_response(response, references=None, book_context=None, is_book_query=
 
 st.set_page_config(
     page_title="BookChat AI - Your Literary Companion",
-    page_icon=":books:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
