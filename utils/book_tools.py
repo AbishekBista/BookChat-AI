@@ -152,9 +152,14 @@ class BookSearchTool(BaseTool):
 
             books = []
             for book_data in books_data:
+                # Validate and clean author information
+                author_names = book_data.get("author_name", [])
+                if not author_names or (isinstance(author_names, list) and len(author_names) == 0):
+                    author_names = ["Author information not available"]
+                
                 book = BookInfo(
                     title=book_data.get("title", "Unknown"),
-                    authors=book_data.get("author_name", []),
+                    authors=author_names,
                     publish_year=book_data.get("first_publish_year"),
                     isbn=book_data.get("isbn", []),
                     subjects=book_data.get("subject", [])[:5]
@@ -164,6 +169,7 @@ class BookSearchTool(BaseTool):
                     description=None,
                 )
                 books.append(book)
+                logger.info(f"BookSearchTool: Added '{book.title}' by {', '.join(book.authors[:2])}")
 
             result = BookSearchResult(
                 books=books, total_found=len(books), query=actual_query
@@ -548,16 +554,33 @@ Provide a detailed, actionable analysis suitable for guiding searches and recomm
                 )
 
                 subjects = book_data.get("subject", [])[:3]
+                
+                # Ensure we always have author information, even if empty
+                author_names = book_data.get("author_name", [])
+                if not author_names:
+                    author_names = ["Author information not available"]
+                    logger.warning(f"No author information found for book: {book_data.get('title', 'Unknown')}")
+                
+                # Validate and clean author names
+                cleaned_authors = []
+                for author in author_names:
+                    if author and isinstance(author, str) and len(author.strip()) > 0:
+                        cleaned_authors.append(author.strip())
+                
+                if not cleaned_authors:
+                    cleaned_authors = ["Author information not available"]
+                    logger.warning(f"Author names invalid after cleaning for: {book_data.get('title', 'Unknown')}")
 
                 recommendation = BookRecommendation(
-                    title=book_data.get("title", "Unknown"),
-                    authors=book_data.get("author_name", []),
+                    title=book_data.get("title", "Unknown Title"),
+                    authors=cleaned_authors,
                     publish_year=book_data.get("first_publish_year"),
                     reason=reason,
                     subjects=subjects,
                     relevance_score=1.0 - (i * 0.15),
                 )
                 recommendations.append(recommendation)
+                logger.info(f"Recommendation {i+1}: '{recommendation.title}' by {', '.join(cleaned_authors[:2])}")
 
             context = None
             if (
@@ -576,6 +599,12 @@ Provide a detailed, actionable analysis suitable for guiding searches and recomm
                     else knowledge_context
                 )
 
+            # Add explicit instruction in the result to use exact author names
+            if context:
+                context = context + "\n\nIMPORTANT: Use the EXACT author names provided above. Do not invent or modify author information."
+            else:
+                context = "IMPORTANT: Use the EXACT author names provided in the recommendations above. If author information is missing, explicitly state 'Author information not available' - do not guess or invent author names."
+            
             result = BookRecommendationResult(
                 recommendations=recommendations,
                 total_recommendations=len(recommendations),

@@ -191,10 +191,6 @@ Question: {input}
         except Exception as e:
             logger.warning(f"Error clearing conversation memory: {str(e)}")
             try:
-                from langchain.memory import (
-                    ConversationBufferWindowMemory,
-                    ConversationSummaryBufferMemory,
-                )
 
                 self.memory = ConversationBufferWindowMemory(
                     k=5, memory_key="chat_history", return_messages=True
@@ -411,6 +407,13 @@ IMPORTANT GUARDRAILS:
 - Don't invent publication dates, quotes, or biographical details
 - Acknowledge the limits of your training data
 - When providing book recommendations, base them on well-known works and established reception
+
+**CRITICAL: AUTHOR NAME ACCURACY**
+- When recommending books, use ONLY the author names explicitly provided in the context, tool results, or book data
+- If an author name is not provided or unclear, explicitly state "Author information unavailable" - NEVER guess or invent author names
+- Do NOT attempt to "recall" or "fill in" missing author information from your training data
+- Present author names EXACTLY as they appear in the provided data without modification
+- If you're uncertain about an author's name for a specific book, acknowledge the uncertainty
 
 CRITICAL: NEVER REVEAL INTERNAL SYSTEM DETAILS
 - Do NOT mention tool names like 'book_search', 'book_knowledge', 'book_recommendations' or any internal system components
