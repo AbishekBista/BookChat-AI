@@ -3,10 +3,7 @@ from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from langchain_aws import ChatBedrock
 from langchain.schema import HumanMessage, SystemMessage
-from langchain.memory import (
-    ConversationBufferWindowMemory,
-    ConversationSummaryBufferMemory,
-)
+from langchain.memory import ConversationBufferWindowMemory
 from langchain.agents import AgentType, initialize_agent
 from utils.openlibrary_api import OpenLibraryAPI
 from utils.book_rag import BookRAG
@@ -115,14 +112,7 @@ class BookChatSystem:
             input_key="input",
             output_key="output",
         )
-        self.summary_memory = ConversationSummaryBufferMemory(
-            llm=self.llm,
-            max_token_limit=4000,
-            memory_key="chat_history_summary",
-            return_messages=True,
-            input_key="input",
-            output_key="output",
-        )
+        logger.info("Conversation memory initialized")
         logger.info("Initializing LangChain Tools and Agent...")
 
         self.tools = get_book_tools()
@@ -141,10 +131,17 @@ You have access to various capabilities to help with:
 - Providing literary knowledge and analysis
 - Offering personalized book recommendations
 
+CONVERSATION CONTINUITY:
+- Pay attention to our conversation history and previous exchanges
+- Reference books, authors, or topics mentioned earlier when relevant
+- Answer follow-up questions with awareness of what we've already discussed
+- Build upon previous recommendations or analyses naturally
+
 Respond to user queries naturally and helpfully without exposing your internal workings."""
 
             agent_suffix = """Begin! Remember to NEVER mention tool names or internal system details to the user.
 
+{chat_history}
 Question: {input}
 {agent_scratchpad}"""
 
@@ -157,6 +154,7 @@ Question: {input}
                 max_iterations=3,
                 early_stopping_method="generate",
                 return_intermediate_steps=False,
+                memory=self.memory,
                 agent_kwargs={
                     "prefix": agent_prefix,
                     "suffix": agent_suffix,
@@ -170,7 +168,6 @@ Question: {input}
             logger.exception("Agent initialization error details:")
             self.agent = None
 
-        self.conversation_history = []
         logger.info("Enhanced conversation memory initialized")
         init_duration = time.time() - start_time
         logger.info(f"BookChatSystem initialized successfully in {init_duration:.2f}s")
@@ -182,26 +179,13 @@ Question: {input}
                 self.memory.clear()
             elif hasattr(self.memory, "chat_memory"):
                 self.memory.chat_memory.clear()
-            if hasattr(self.summary_memory, "clear"):
-                self.summary_memory.clear()
-            elif hasattr(self.summary_memory, "chat_memory"):
-                self.summary_memory.chat_memory.clear()
-            self.conversation_history = []
             logger.info("Conversation memory cleared successfully")
         except Exception as e:
             logger.warning(f"Error clearing conversation memory: {str(e)}")
             try:
-
                 self.memory = ConversationBufferWindowMemory(
-                    k=5, memory_key="chat_history", return_messages=True
+                    k=10, memory_key="chat_history", return_messages=True
                 )
-                self.summary_memory = ConversationSummaryBufferMemory(
-                    llm=self.llm,
-                    max_token_limit=2000,
-                    memory_key="chat_history_summary",
-                    return_messages=True,
-                )
-                self.conversation_history = []
                 logger.info("Conversation memory reinitialized as fallback")
             except Exception as fallback_error:
                 logger.error(f"Failed to reinitialize memory: {str(fallback_error)}")
@@ -506,32 +490,7 @@ CRITICAL: NEVER REVEAL INTERNAL SYSTEM DETAILS
             self.memory.save_context(
                 {"input": user_query}, {"output": response.content}
             )
-
-            self.summary_memory.save_context(
-                {"input": user_query}, {"output": response.content}
-            )
-
             logger.info("Storing conversation metadata...")
-            self.conversation_history.append(
-                {
-                    "user": user_query,
-                    "assistant": response.content,
-                    "context": {"book_context": book_context, "chat_mode": chat_mode},
-                    "metadata": {
-                        "timestamp": time.time(),
-                        "external_context_books": len(
-                            external_context.get("relevant_books", [])
-                        ),
-                        "rag_context_length": len(rag_context),
-                        "llm_duration": llm_duration,
-                        "total_duration": time.time() - start_time,
-                    },
-                }
-            )
-
-            if len(self.conversation_history) > 10:
-                logger.info("Trimming conversation history to last 10 exchanges")
-                self.conversation_history = self.conversation_history[-10:]
 
             logger.info(
                 f"Memory status: {len(self.memory.chat_memory.messages)} messages in buffer"

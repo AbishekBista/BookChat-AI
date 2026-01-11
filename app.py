@@ -137,9 +137,7 @@ def format_response(response, references=None, book_context=None, is_book_query=
 
     response = re.sub(r'"([^"]*)"', r'**"\1"**', response)
 
-    disclaimer = "\n\n**Knowledge Verification**: This response is generated based on my training data and may contain inaccuracies. For scholarly or critical analysis, please cross-reference with authoritative literary sources, academic databases, or the original texts.*"
-
-    response = response + disclaimer
+    response = response
 
     return response.strip()
 
@@ -177,6 +175,10 @@ def initialize_session_state():
         st.session_state.previous_book_context = []
         logger.info("Initialized previous_book_context tracker")
 
+    if "previous_chat_mode" not in st.session_state:
+        st.session_state.previous_chat_mode = None
+        logger.info("Initialized previous_chat_mode tracker")
+
     logger.info("Session state initialization completed")
 
 
@@ -212,7 +214,18 @@ def main():
             "Literary Analysis": "Literary Analysis",
             "Author Info": "Author Biography",
         }
-        st.session_state.chat_mode = mode_mapping[chat_mode]
+        current_chat_mode = mode_mapping[chat_mode]
+        
+        # Check if chat mode changed and clear memory/messages if so
+        if st.session_state.previous_chat_mode is not None and current_chat_mode != st.session_state.previous_chat_mode:
+            logger.info(f"Chat mode changed from '{st.session_state.previous_chat_mode}' to '{current_chat_mode}'")
+            if st.session_state.book_chat_system:
+                st.session_state.book_chat_system.clear_conversation_memory()
+            st.session_state.messages = []
+            logger.info("Cleared memory and messages due to chat mode change")
+        
+        st.session_state.chat_mode = current_chat_mode
+        st.session_state.previous_chat_mode = current_chat_mode
 
         st.divider()
 
@@ -323,6 +336,26 @@ def main():
 
             st.caption(f"{len(st.session_state.selected_books)} book(s) in context")
 
+    # Check for book context changes and clear memory/messages immediately
+    current_book_keys = [
+        f"{book.get('title', '')}__{book.get('author_name', [''])[0] if book.get('author_name') else ''}"
+        for book in st.session_state.selected_books
+    ]
+    
+    if current_book_keys != st.session_state.previous_book_context:
+        logger.info(
+            f"Book context changed from {len(st.session_state.previous_book_context)} to {len(current_book_keys)} books"
+        )
+        logger.info(f"Previous context: {st.session_state.previous_book_context}")
+        logger.info(f"Current context: {current_book_keys}")
+        
+        if st.session_state.book_chat_system:
+            st.session_state.book_chat_system.clear_conversation_memory()
+        st.session_state.messages = []
+        logger.info("Cleared memory and messages due to book context change")
+        
+        st.session_state.previous_book_context = current_book_keys.copy()
+
     if not st.session_state.messages:
         st.markdown("### Welcome to BookChat AI!")
         st.markdown(
@@ -384,23 +417,6 @@ def main():
 
     if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
         latest_message = st.session_state.messages[-1]["content"]
-
-        current_book_keys = [
-            f"{book.get('title', '')}__{book.get('author_name', [''])[0] if book.get('author_name') else ''}"
-            for book in st.session_state.selected_books
-        ]
-
-        if current_book_keys != st.session_state.previous_book_context:
-            logger.info(
-                f"Book context changed from {len(st.session_state.previous_book_context)} to {len(current_book_keys)} books"
-            )
-            logger.info(f"Previous context: {st.session_state.previous_book_context}")
-            logger.info(f"Current context: {current_book_keys}")
-
-            if st.session_state.book_chat_system:
-                st.session_state.book_chat_system.clear_conversation_memory()
-
-            st.session_state.previous_book_context = current_book_keys.copy()
 
         with st.spinner("Analyzing your query..."):
             try:
